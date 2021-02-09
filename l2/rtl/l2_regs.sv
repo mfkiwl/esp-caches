@@ -29,6 +29,8 @@ module l2_regs (
     input logic set_ongoing_atomic, 
     input logic clr_evict_stall, 
     input logic set_evict_stall, 
+    input logic clr_ongoing_atomic_set_conflict_instr,
+    input logic set_ongoing_atomic_set_conflict_instr,
     input logic [`REQS_BITS-1:0] reqs_atomic_i, 
     input logic [`REQS_BITS-1:0] reqs_i, 
     input logic [`REQS_BITS-1:0] fwd_stall_i_wr_data,
@@ -38,7 +40,8 @@ module l2_regs (
     output logic fwd_stall, 
     output logic fwd_stall_ended, 
     output logic ongoing_atomic, 
-    output logic evict_stall, 
+    output logic evict_stall,
+    output logic ongoing_atomic_set_conflict_instr,
     output logic [`L2_SET_BITS:0] flush_set, 
     output logic [`L2_WAY_BITS:0] flush_way,
     output logic [`REQS_BITS-1:0] fwd_stall_i, 
@@ -144,5 +147,14 @@ module l2_regs (
         end
     end
 
+    always_ff @(posedge clk or negedge rst) begin
+        if (!rst) begin
+            ongoing_atomic_set_conflict_instr <= 1'b0;
+        end else if (clr_ongoing_atomic_set_conflict_instr) begin
+            ongoing_atomic_set_conflict_instr <= 1'b0;
+        end else if (set_ongoing_atomic_set_conflict_instr) begin
+            ongoing_atomic_set_conflict_instr <= 1'b1;
+        end
+    end
 endmodule
 

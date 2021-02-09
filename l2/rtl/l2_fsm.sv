@@ -28,6 +28,7 @@ module l2_fsm(
     input logic set_conflict,
     input logic set_set_conflict_reqs,
     input logic ongoing_atomic,
+    input logic ongoing_atomic_set_conflict_instr,
     input logic clr_set_conflict_reqs, 
     input logic tag_hit_next,
     input logic empty_way_found_next,
@@ -89,6 +90,8 @@ module l2_fsm(
     output logic clr_ongoing_atomic,
     output logic fill_reqs_flush, 
     output logic set_evict_stall, 
+    output logic set_ongoing_atomic_set_conflict_instr,
+    output logic clr_ongoing_atomic_set_conflict_instr,
     output logic [2:0] reqs_op_code,
     output logic[`REQS_BITS-1:0]  reqs_atomic_i,
     output state_t wr_data_state,
@@ -187,7 +190,7 @@ module l2_fsm(
             atomic_line_addr <= addr_br.line_addr; 
         end
     end
-    
+
     always_ff @(posedge clk or negedge rst) begin 
         if (!rst) begin 
             reqs_atomic_i <= 0; 
@@ -207,6 +210,16 @@ module l2_fsm(
         end else if ((state == CPU_REQ_EVICT && l2_req_out_ready_int) || ((state == FWD_NO_HIT || state == FWD_HIT) && l2_rsp_out_ready_int)) begin 
             ready_bits[1] <= 1'b1; 
         end
+    end
+    
+    l2_way_t evict_way_tmp;
+    line_addr_t ongoing_atomic_set_conflict_instr_line_addr;
+    always_ff @(posedge clk or negedge rst) begin 
+        if (!rst) begin 
+           ongoing_atomic_set_conflict_instr_line_addr <= 0; 
+       end else if (set_ongoing_atomic_set_conflict_instr) begin 
+           ongoing_atomic_set_conflict_instr_line_addr <= addr_br.line_addr;
+       end
     end
 
     always_comb begin 
@@ -370,7 +383,7 @@ module l2_fsm(
                 end
             end
             CPU_REQ_REQS_LOOKUP : begin 
-                if (ongoing_atomic) begin 
+                if (ongoing_atomic && l2_cpu_req.hprot == `DATA) begin 
                     if (atomic_line_addr != addr_br.line_addr) begin 
                         next_state = CPU_REQ_ATOMIC_OVERRIDE;
                     end else begin 
@@ -381,7 +394,11 @@ module l2_fsm(
                         end
                     end    
                 end else if ((set_conflict | set_set_conflict_reqs) & !clr_set_conflict_reqs) begin 
-                    next_state = CPU_REQ_SET_CONFLICT; 
+                    if (ongoing_atomic && l2_cpu_req.hprot == `INSTR) begin 
+                        next_state = CPU_REQ_TAG_LOOKUP;
+                    end else begin 
+                        next_state = CPU_REQ_SET_CONFLICT; 
+                    end
                 end else begin 
                     next_state = CPU_REQ_TAG_LOOKUP;
                 end
@@ -389,8 +406,8 @@ module l2_fsm(
             CPU_REQ_ATOMIC_OVERRIDE : begin 
                 next_state = DECODE;
             end 
-            CPU_REQ_ATOMIC_CONTINUE_READ : begin 
-                if (l2_rd_rsp_ready_int) begin 
+            CPU_REQ_ATOMIC_CONTINUE_READ : begin     
+            if (l2_rd_rsp_ready_int || l2_cpu_req.cpu_msg == `READ_ATOMIC) begin 
                     next_state = DECODE;
                 end
             end
@@ -494,6 +511,8 @@ module l2_fsm(
         set_set_conflict_fsm = 1'b0;
         clr_set_conflict_fsm = 1'b0; 
         set_cpu_req_conflict = 1'b0; 
+        set_ongoing_atomic_set_conflict_instr = 1'b0;
+        clr_ongoing_atomic_set_conflict_instr = 1'b0;
         clr_ongoing_atomic  = 1'b0; 
         update_atomic = 1'b0;
         clr_evict_stall = 1'b0;
@@ -542,6 +561,8 @@ module l2_fsm(
         hsize_in = 0; 
         line_in = 0;
 
+        evict_way_tmp = 0;
+
 `ifdef STATS_ENABLE
         l2_stats_o = 1'b0; 
         l2_stats_valid_int = 1'b0; 
@@ -581,8 +602,14 @@ module l2_fsm(
                 wr_data_line = l2_rsp_in.line;
                 wr_data_hprot = reqs[reqs_i].hprot;
                 wr_data_state = (l2_rsp_in.coh_msg == `RSP_EDATA) ? `EXCLUSIVE : `SHARED;
+                
+                if (ongoing_atomic_set_conflict_instr && 
+                    ongoing_atomic_set_conflict_instr_line_addr == l2_rsp_in.addr) begin
+                    clr_ongoing_atomic_set_conflict_instr = 1'b1;
+                end
+                
                 //only increment once if not ready
-                if (l2_rd_rsp_ready_int) begin 
+                 if (l2_rd_rsp_ready_int) begin 
                     incr_reqs_cnt = 1'b1;
                 end
             end
@@ -686,7 +713,12 @@ module l2_fsm(
                     tag_wr_data_req = reqs[reqs_i].tag_estall; 
                     
                     wr_en_evict_way = 1'b1; 
-                    wr_data_evict_way = reqs[reqs_i].way + 1; 
+                    if (ongoing_atomic_set_conflict_instr && reqs[reqs_atomic_i] == evict_way_buf) begin 
+                        wr_data_evict_way = reqs[reqs_i].way + 2;
+                    end else begin 
+                        wr_data_evict_way = reqs[reqs_i].way + 1; 
+                    end
+                    
                     set_in = reqs[reqs_i].set; 
 
                     l2_req_out_o.hprot = reqs[reqs_i].hprot; 
@@ -893,6 +925,10 @@ module l2_fsm(
                 reqs_op_code = `L2_REQS_PEEK_REQ;
                 rd_mem_en = 1'b1;
                 set_in = addr_br.set; 
+                if ((set_conflict | set_set_conflict_reqs) && !clr_set_conflict_reqs 
+                    && l2_cpu_req.hprot == `INSTR && ongoing_atomic) begin 
+                    set_ongoing_atomic_set_conflict_instr = 1'b1;
+                end
             end
             CPU_REQ_ATOMIC_OVERRIDE : begin 
                 set_set_conflict_fsm = 1'b1;
@@ -913,26 +949,32 @@ module l2_fsm(
                 wr_data_state = `MODIFIED; 
             end 
             CPU_REQ_ATOMIC_CONTINUE_READ :  begin 
-                clr_set_conflict_fsm = 1'b1;
-                l2_rd_rsp_valid_int = 1'b1; 
-                l2_rd_rsp_o.line = reqs[reqs_atomic_i].line;
+                set_in = reqs[reqs_atomic_i].set; 
+                way = reqs[reqs_atomic_i].way;
+                
+                put_reqs_atomic = 1'b1;
+                wr_en_put_reqs = 1'b1; 
+                wr_data_tag = reqs[reqs_atomic_i].tag;
+                wr_data_line =  reqs[reqs_atomic_i].line;
+                wr_data_hprot = reqs[reqs_atomic_i].hprot;
+                wr_data_state = `MODIFIED; 
+                clr_ongoing_atomic = 1'b1;
+
+                wr_req_state_atomic = 1'b1; 
+                state_wr_data_req = `INVALID;
+                
                 if (l2_cpu_req.cpu_msg == `READ) begin 
-                    wr_req_state_atomic = 1'b1; 
-                    state_wr_data_req = `INVALID;
+                    clr_set_conflict_fsm = 1'b1;
+                    l2_rd_rsp_valid_int = 1'b1; 
+                    l2_rd_rsp_o.line = reqs[reqs_atomic_i].line;
+
                     if (l2_rd_rsp_ready_int) begin 
                         incr_reqs_cnt = 1'b1;
                     end
-                    
-                    set_in = reqs[reqs_atomic_i].set; 
-                    way = reqs[reqs_atomic_i].way;
-                    clr_ongoing_atomic = 1'b1;
-                    
-                    put_reqs_atomic = 1'b1;
-                    wr_en_put_reqs = 1'b1; 
-                    wr_data_tag = reqs[reqs_atomic_i].tag;
-                    wr_data_line =  reqs[reqs_atomic_i].line;
-                    wr_data_hprot = reqs[reqs_atomic_i].hprot;
-                    wr_data_state = `MODIFIED; 
+                end else begin 
+                    set_set_conflict_fsm = 1'b1;
+                    incr_reqs_cnt = 1'b1;
+                    set_cpu_req_conflict = 1'b1;
                 end
             end 
             CPU_REQ_ATOMIC_CONTINUE_WRITE : begin 
@@ -984,6 +1026,10 @@ module l2_fsm(
                     line_wr_data_req = lines_buf[way_hit];
                     set_ongoing_atomic = 1'b1;
                 end
+                if (ongoing_atomic_set_conflict_instr) begin
+                    clr_ongoing_atomic_set_conflict_instr = 1'b1;
+                end 
+                
                 l2_rd_rsp_valid_int = 1'b1; 
                 l2_rd_rsp_o.line = lines_buf[way_hit];
 `ifdef STATS_ENABLE
@@ -1002,6 +1048,7 @@ module l2_fsm(
                 if (l2_req_out_ready_int) begin  
                     fill_reqs = 1'b1; 
                 end
+                
                 cpu_msg_wr_data_req = l2_cpu_req.cpu_msg;
                 tag_estall_wr_data_req = 0; 
                 tag_wr_data_req = addr_br.tag; 
@@ -1083,14 +1130,21 @@ module l2_fsm(
             end
             CPU_REQ_EVICT : begin 
                 set_evict_stall = 1'b1;
+                
+                if (ongoing_atomic_set_conflict_instr && evict_way_buf == reqs[reqs_atomic_i].way) begin
+                    evict_way_tmp = evict_way_buf + 1; 
+                end else begin 
+                    evict_way_tmp = evict_way_buf;
+                end
+                
                 if (!ready_bits[0]) begin 
                     l2_inval_valid_int = 1'b1;
                 end
-                l2_inval_o = (tags_buf[evict_way_buf] << `L2_SET_BITS) | addr_br.set;
+                l2_inval_o = (tags_buf[evict_way_tmp] << `L2_SET_BITS) | addr_br.set;
                 if (!ready_bits[1]) begin 
                     l2_req_out_valid_int = 1'b1;
                 end
-                case (states_buf[evict_way_buf]) 
+                case (states_buf[evict_way_tmp]) 
                     `SHARED : begin 
                         l2_req_out_o.coh_msg = `REQ_PUTS;
                         state_wr_data_req = `SIA;
@@ -1106,8 +1160,8 @@ module l2_fsm(
                 endcase    
                 
                 l2_req_out_o.hprot = 0;
-                l2_req_out_o.addr = (tags_buf[evict_way_buf] << `L2_SET_BITS) | addr_br.set; 
-                l2_req_out_o.line = lines_buf[evict_way_buf]; 
+                l2_req_out_o.addr = (tags_buf[evict_way_tmp] << `L2_SET_BITS) | addr_br.set; 
+                l2_req_out_o.line = lines_buf[evict_way_tmp]; 
               
                 if (l2_inval_ready_int && l2_req_out_ready_int) begin 
                     fill_reqs = 1'b1;
@@ -1131,12 +1185,12 @@ module l2_fsm(
  
                 cpu_msg_wr_data_req = l2_cpu_req.cpu_msg;
                 tag_estall_wr_data_req = addr_br.tag;
-                tag_wr_data_req = tags_buf[evict_way_buf];
-                way_wr_data_req = evict_way_buf; 
+                tag_wr_data_req = tags_buf[evict_way_tmp];
+                way_wr_data_req = evict_way_tmp; 
                 hsize_wr_data_req = l2_cpu_req.hsize;
                 hprot_wr_data_req = l2_cpu_req.hprot;
                 word_wr_data_req = l2_cpu_req.word;
-                line_wr_data_req = lines_buf[evict_way_buf];
+                line_wr_data_req = lines_buf[evict_way_tmp];
             end
             default : begin 
                 reqs_op_code = `L2_REQS_IDLE;

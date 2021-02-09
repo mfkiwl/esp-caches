@@ -80,6 +80,7 @@ module l2_core(
     logic wr_req_invack_cnt, wr_req_tag, wr_en_put_reqs, wr_req_state_atomic, put_reqs_atomic; 
     logic wr_en_lines_buf, wr_en_tags_buf, wr_en_states_buf, wr_en_hprots_buf; 
     logic wr_rst, wr_en_state, wr_en_line, wr_en_evict_way, rd_en; 
+    logic ongoing_atomic_set_conflict_instr, set_ongoing_atomic_set_conflict_instr, clr_ongoing_atomic_set_conflict_instr;
     logic [2:0] reqs_op_code; 
     logic [`L2_SET_BITS:0] flush_set; 
     logic [`L2_WAY_BITS:0] flush_way; 

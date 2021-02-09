@@ -22,6 +22,7 @@ module l2_input_decoder (
     input logic set_conflict, 
     input logic evict_stall, 
     input logic ongoing_atomic, 
+    input logic ongoing_atomic_set_conflict_instr,
     input line_addr_t rsp_in_addr, 
     input line_addr_t fwd_in_addr, 
     input addr_t cpu_req_addr, 
@@ -119,7 +120,7 @@ module l2_input_decoder (
                     flush_done = 1'b1; 
                 end 
             end else if ((l2_cpu_req_valid_int || set_conflict)  && !evict_stall 
-                                && (reqs_cnt != 0 || ongoing_atomic)) begin 
+                                && (reqs_cnt != 0 || ongoing_atomic) && !ongoing_atomic_set_conflict_instr) begin 
                 do_cpu_req_next = 1'b1;
                 if (!set_conflict) begin 
                     l2_cpu_req_ready_int = 1'b1; 
