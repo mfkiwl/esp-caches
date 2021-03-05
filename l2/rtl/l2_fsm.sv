@@ -17,7 +17,8 @@ module l2_fsm(
     input logic l2_rd_rsp_ready_int,
     input logic l2_req_out_ready_int,
     input logic l2_rsp_out_ready_int,
-    input logic l2_inval_ready_int, 
+    input logic l2_inval_ready_int,
+    input logic l2_bresp_ready_int,
     input logic fwd_stall,
     input logic evict_stall,
     input logic ongoing_flush,
@@ -78,6 +79,7 @@ module l2_fsm(
     output logic l2_req_out_valid_int,
     output logic l2_rsp_out_valid_int,
     output logic l2_inval_valid_int, 
+    output logic l2_bresp_valid_int,
     output logic incr_reqs_cnt,
     output logic set_ongoing_atomic,
     output logic incr_flush_way,
@@ -112,6 +114,7 @@ module l2_fsm(
     output l2_way_t way_wr_data_req, 
     output l2_way_t wr_data_evict_way,
     output line_addr_t l2_inval_o,
+    output bresp_t l2_bresp_o,
     output word_t word_in, 
     output word_offset_t w_off_in, 
     output byte_offset_t b_off_in, 
@@ -158,6 +161,9 @@ module l2_fsm(
     localparam CPU_REQ_WRITE_EM = 5'b11001; 
     localparam CPU_REQ_EMPTY_WAY = 5'b11010; 
     localparam CPU_REQ_EVICT = 5'b11011; 
+
+    logic [1:0] probe;
+    assign probe = l2_cpu_req.cpu_msg;
 
     logic [4:0] state, next_state;
     always_ff @(posedge clk or negedge rst) begin 
@@ -383,7 +389,11 @@ module l2_fsm(
                 end
             end
             CPU_REQ_REQS_LOOKUP : begin 
-                if (ongoing_atomic && l2_cpu_req.hprot == `DATA) begin 
+                if (!ongoing_atomic && l2_cpu_req.cpu_msg == `WRITE_ATOMIC) begin 
+                    if (l2_bresp_ready_int) begin
+                        next_state = DECODE;
+                    end
+                end else if (ongoing_atomic && l2_cpu_req.hprot == `DATA) begin 
                     if (atomic_line_addr != addr_br.line_addr) begin 
                         next_state = CPU_REQ_ATOMIC_OVERRIDE;
                     end else begin 
@@ -412,7 +422,9 @@ module l2_fsm(
                 end
             end
             CPU_REQ_ATOMIC_CONTINUE_WRITE : begin 
-                next_state = DECODE;
+                if (l2_bresp_ready_int) begin
+                    next_state = DECODE;
+                end
             end
             CPU_REQ_SET_CONFLICT : begin 
                 next_state = DECODE; 
@@ -523,6 +535,8 @@ module l2_fsm(
         l2_rd_rsp_valid_int = 1'b0;
         l2_inval_o = 0; 
         l2_inval_valid_int = 1'b0; 
+        l2_bresp_valid_int = 1'b0;
+        l2_bresp_o = `BRESP_OKAY;
 
         addr_br_reqs.line = 0;
         addr_br_reqs.line_addr = 0;
@@ -606,6 +620,7 @@ module l2_fsm(
                 if (ongoing_atomic_set_conflict_instr && 
                     ongoing_atomic_set_conflict_instr_line_addr == l2_rsp_in.addr) begin
                     clr_ongoing_atomic_set_conflict_instr = 1'b1;
+                    clr_set_conflict_fsm = 1'b1;
                 end
                 
                 //only increment once if not ready
@@ -713,7 +728,7 @@ module l2_fsm(
                     tag_wr_data_req = reqs[reqs_i].tag_estall; 
                     
                     wr_en_evict_way = 1'b1; 
-                    if (ongoing_atomic_set_conflict_instr && reqs[reqs_atomic_i] == evict_way_buf) begin 
+                    if (ongoing_atomic_set_conflict_instr && reqs[reqs_atomic_i].way == evict_way_buf) begin 
                         wr_data_evict_way = reqs[reqs_i].way + 2;
                     end else begin 
                         wr_data_evict_way = reqs[reqs_i].way + 1; 
@@ -929,6 +944,11 @@ module l2_fsm(
                     && l2_cpu_req.hprot == `INSTR && ongoing_atomic) begin 
                     set_ongoing_atomic_set_conflict_instr = 1'b1;
                 end
+                
+                if (l2_cpu_req.cpu_msg == `WRITE_ATOMIC && !ongoing_atomic) begin
+                    l2_bresp_valid_int = 1'b1;
+                    l2_bresp_o = `BRESP_OKAY;
+                end
             end
             CPU_REQ_ATOMIC_OVERRIDE : begin 
                 set_set_conflict_fsm = 1'b1;
@@ -951,30 +971,26 @@ module l2_fsm(
             CPU_REQ_ATOMIC_CONTINUE_READ :  begin 
                 set_in = reqs[reqs_atomic_i].set; 
                 way = reqs[reqs_atomic_i].way;
-                
-                put_reqs_atomic = 1'b1;
-                wr_en_put_reqs = 1'b1; 
-                wr_data_tag = reqs[reqs_atomic_i].tag;
-                wr_data_line =  reqs[reqs_atomic_i].line;
-                wr_data_hprot = reqs[reqs_atomic_i].hprot;
-                wr_data_state = `MODIFIED; 
-                clr_ongoing_atomic = 1'b1;
-
-                wr_req_state_atomic = 1'b1; 
-                state_wr_data_req = `INVALID;
-                
+                 
                 if (l2_cpu_req.cpu_msg == `READ) begin 
                     clr_set_conflict_fsm = 1'b1;
                     l2_rd_rsp_valid_int = 1'b1; 
                     l2_rd_rsp_o.line = reqs[reqs_atomic_i].line;
-
-                    if (l2_rd_rsp_ready_int) begin 
-                        incr_reqs_cnt = 1'b1;
-                    end
                 end else begin 
                     set_set_conflict_fsm = 1'b1;
                     incr_reqs_cnt = 1'b1;
                     set_cpu_req_conflict = 1'b1;
+                    
+                    put_reqs_atomic = 1'b1;
+                    wr_en_put_reqs = 1'b1; 
+                    wr_data_tag = reqs[reqs_atomic_i].tag;
+                    wr_data_line =  reqs[reqs_atomic_i].line;
+                    wr_data_hprot = reqs[reqs_atomic_i].hprot;
+                    wr_data_state = `MODIFIED; 
+                    clr_ongoing_atomic = 1'b1;
+                
+                    wr_req_state_atomic = 1'b1; 
+                    state_wr_data_req = `INVALID;
                 end
             end 
             CPU_REQ_ATOMIC_CONTINUE_WRITE : begin 
@@ -999,6 +1015,11 @@ module l2_fsm(
                 wr_data_hprot = reqs[reqs_atomic_i].hprot;
                 wr_data_state = `MODIFIED; 
                 clr_ongoing_atomic = 1'b1;
+                
+                l2_bresp_valid_int = 1'b1;
+                if (l2_cpu_req.cpu_msg == `WRITE_ATOMIC) begin 
+                    l2_bresp_o = `BRESP_EXOKAY;
+                end
             end
             CPU_REQ_SET_CONFLICT : begin 
                 set_cpu_req_conflict = 1'b1; 
@@ -1028,6 +1049,7 @@ module l2_fsm(
                 end
                 if (ongoing_atomic_set_conflict_instr) begin
                     clr_ongoing_atomic_set_conflict_instr = 1'b1;
+                    clr_set_conflict_fsm = 1'b1;
                 end 
                 
                 l2_rd_rsp_valid_int = 1'b1; 

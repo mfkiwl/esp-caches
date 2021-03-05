@@ -77,7 +77,7 @@
 #define INVACK_CNT_CALC_WIDTH   (INVACK_CNT_WIDTH + 1)
 #define CACHE_ID_WIDTH          MAX_N_L2_BITS
 #define LLC_COH_DEV_ID_WIDTH    MAX_N_LLC_BITS
-
+#define BRESP_WIDTH 2
 //
 // L2
 //

@@ -33,6 +33,7 @@ public:
     // Output ports
     get_initiator<l2_rd_rsp_t>	l2_rd_rsp_tb;
     get_initiator<l2_inval_t>   l2_inval_tb;
+    get_initiator<bresp_t>   l2_bresp_tb;
     get_initiator<l2_req_out_t> l2_req_out_tb;
     get_initiator<l2_rsp_out_t> l2_rsp_out_tb;
 
@@ -67,6 +68,7 @@ public:
 	l2_flush_tb.clk_rst (clk, rst);
 	l2_rd_rsp_tb.clk_rst(clk, rst);
 	l2_inval_tb.clk_rst(clk, rst);
+	l2_bresp_tb.clk_rst(clk, rst);
 	l2_req_out_tb.clk_rst(clk, rst);
 	l2_rsp_out_tb.clk_rst(clk, rst);
 #ifdef STATS_ENABLE
